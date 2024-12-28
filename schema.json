@@ -1,0 +1,109 @@
+{
+    "id": "uuid", 
+	"hash_name": "str",
+    "short_name": "str",
+	"item_url": "str",
+    "steam_listings": "int",
+    "steam_buy_price": "float",
+	"steam_sell_price": "float",
+    "min_buy_price": "float (calculated)",
+    "max_sell_price": "float (calculated)",
+    "max_buy_profit": "float (calculated)",
+    "max_sell_profit": "float (calculated)",
+    "1_week_price_change": "float (calculated)",
+    "1_month_price_change": "float (calculated)",
+    "1_year_price_change": "float (calculated)",
+    "type": ["Agent", "Charm", "Collectible", "Container", "Gloves", "Graffiti", "Key", "Music Kit", "Pass", "Patch", "Sticker", "Weapon", "Other"],
+	"if type == Container": {
+        "collection": "str",
+        "container_type": ["Case", "Souvenir Collection", "Sticker Capsule", "Autograph Capsule", "Patch Pack", "Music Kit Box", "Collectible Pins Capsule", "Graffiti Box"],
+        "key_needed": "bool",
+        "tournament": "optional[str] (if souvenir)",
+        "team": "optional[str] (if autograph)",
+        "stattrak": "optional[bool] (if music box)",
+        "average_return": "float (calculated)",
+        "roi (return on investment)": "float (calculated)",
+        "profit_chance": "float (calculated)"
+    },
+    "if type == Weapon": {
+        "rarity": ["Consumer Grade", "Industrial Grade", "Mil-spec Grade", "Restricted", "Classified", "Covert", "Contraband"],
+		"appearance": ["Battle-scarred", "Well-worn", "Field-tested", "Minimal wear", "Factory new", "Not painted"],
+        "collection": "str",
+        "weapon_class": ["Equipment", "Knife", "Machinegun", "Pistol", "Rifle", "Shotgun", "SMG", "Sniper Rifle"],
+        "weapon_type": ["AK-47", "AUG", "AWP", "Bayonet", "Bowie Knife", "Butterfly Knife", "Classic Knife", "CZ75-Auto", "Desert Eagle", "Dual Berettas", "Falchion Knife", "FAMAS", "Five-SeveN", "Flip Knife", "G3SG1", "Galil AR", "Glock-18", "Gut Knife", "Huntsman Knife", "Karambit", "Kukri Knife", "M249", "M4A1-S", "M4A4", "M9 Bayonet", "MAC-10", "MAG-7", "MP5-SD", "MP7", "MP9", "Navaja Knife", "Negev", "Nomad Knife", "Nova", "P2000", "P250", "P90", "Paracord Knife", "PP-Bizon", "R8 Revolver", "Sawed-Off", "SCAR-20", "SG 553", "Shadow Daggers", "Skeleton Knife", "SSG 08", "Stiletto Knife", "Survival Knife", "Talon Knife", "Tec-9", "UMP-45", "Ursus Knife", "USP-S", "XM1014", "Zeus x27"],
+		"stattrak": "bool",
+		"souvenir": "bool",
+        "tournament": "optional[str] (if souvenir)",
+        "for listings": {
+            "stickers": "list[url]",
+            "value_with_stickers": "float (calculated)"
+        }
+	},
+    "if type == Sticker": {
+        "rarity": ["High Grade", "Remarkable", "Exotic", "Extraordinary", "Contraband"],
+        "material": ["Standart", "Holo", "Foil", "Gold", "Lenticular"],
+        "collection": "str",
+        "sticker_type": ["normal", "tournament", "team", "autograph"],
+        "tournament": "optional[str]",
+        "team": "optional[str]",
+        "player": "optional[str]"
+    },
+    "if type == Charm": {
+        "rarity": ["High Grade", "Remarkable", "Exotic", "Extraordinary"],
+        "collection": "str"
+    },
+    "if type == Agent": {
+        "rarity": ["Distinguished", "Exceptional", "Superior", "Master"],
+        "collection": "str",
+        "side": ["Terrorists", "Counter-Terrorists"],
+        "affiliation": "str",
+        "for listings": {
+            "patches": "list[url]",
+            "value_with_patches": "float (calculated)"
+        }
+    },
+    "if type == Patch": {
+        "rarity": ["High Grade", "Remarkable", "Exotic"],
+        "material": ["Standart", "Gold"],
+        "collection": "str",
+        "patch_type": ["normal", "tournament", "team"],
+        "tournament": "optional[str]",
+        "team": "optional[str]"
+    },
+    "if type == Gloves": {
+        "glove_type": "str",
+        "appearance": ["Battle-scarred", "Well-worn", "Field-tested", "Minimal wear", "Factory new"],
+        "cases": "list[collection]"
+    },
+    "if type == Graffiti": {
+        "rarity": ["Base Grade", "High Grade", "Remarkable", "Exotic"],
+        "collection": "str",
+        "color": ["Multicolor", "Tracer Yellow", "War Pig Pink", "Blood Red", "Tiger Orange", "Dust Brown", "Desert Amber", "Brick Red", "Bazooka Pink", "Princess Pink", "Cash Green", "Monster Purple", "Battle Green", "Jungle Green", "Frog Green", "Shark White", "Wire Blue", "Monarch Blue", "SWAT Blue", "Violent Violet"],
+        "graffiti_type": ["normal", "tournament", "team"],
+        "tournament": "optional[str]",
+        "team": "optional[str]"
+    },
+    "if type == Music Kit": {
+        "collection": "str",
+        "artist": "str",
+        "album": "str",
+        "stattrak": "bool"
+    },
+    "if type == Pass": {
+        "type": ["Operation", "Viewer"],
+        "tournament": "optional[str] (if viewer)",
+        "souvenir_tokens": "optional[bool] (if viewer)",
+        "operation": "optional[str] (if operation)",
+        "expired": "optional[bool] (if operation)"
+    },
+    "if type == Collectible": {
+        "rarity": ["High Grade", "Remarkable", "Exotic", "Extraordinary"],
+        "collection": "str"
+    },
+    "if type == Key": {
+        "collection": "str"
+    },
+    "if type == Other": {
+        "other_type": ["Gift", "Tag", "Tool"]
+    }
+}

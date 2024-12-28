@@ -37,7 +37,7 @@ with open('resp_item_listings.json', 'w', encoding='utf-16') as f:
     json.dump(listing_json, f, indent=4)
 
 page_resp = requests.get(page_url).text
-soup = BeautifulSoup(page_resp, 'lxml')
+soup = BeautifulSoup(page_resp, 'html.parser')
 
 parse_data_text = 'var line1='
 parse_id_text = 'Market_LoadOrderSpread( '
