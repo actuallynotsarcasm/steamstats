@@ -30,8 +30,6 @@ async def main():
     for obj in async_objects:
         obj.start_scheduling()
 
-    await asyncio.sleep(10) # Keep the event loop running
-
     # Cancel a task if needed
     async_objects[0].cancel_scheduling()
 

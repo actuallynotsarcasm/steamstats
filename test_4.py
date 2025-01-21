@@ -19,6 +19,8 @@ class ProxyQueue(heapdict):
         self.cooldown_duration = cooldown_duration
         self.blocked = False
         self.cooldown_end_timestamps = []
+        self.queue_semaphore = asyncio.Semaphore(1)
+        self.cooldown_list_semaphore = asyncio.Semaphore(1)
         super(ProxyQueue, self).__init__()
         if proxy_list:
             self.add_proxies(proxy_list)
@@ -28,10 +30,11 @@ class ProxyQueue(heapdict):
             if not proxy in self:
                 self[proxy] = Priority.UNCHECKED
 
-    def popitem(self, key):
+    async def popitem(self, key):
         priority = super(ProxyQueue, self).peekitem(key)[1]
         if priority == Priority.COOLDOWN:
-            asyncio.run()
+            delay = time.time()
+            await asyncio.sleep()
         return item
 
     def __setitem__(self, key, value):
