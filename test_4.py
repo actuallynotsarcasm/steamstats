@@ -9,6 +9,7 @@ import io
 from aiohttp_socks import ProxyType, ProxyConnector
 import certifi
 import ssl
+import time
 
 
 class Priority:
@@ -78,6 +79,10 @@ class ProxyRotator:
         self.list_update_function = list_update_function
         self.update_period = update_period
 
+        self.success_counter = 0
+        self.used_set = set()
+        self.time_started = time.time()
+
         if proxy_list or use_direct_connection:
             if use_direct_connection:
                 pass #TODO
@@ -95,12 +100,37 @@ class ProxyRotator:
     async def _regular_update_loop(self):
         pass
 
+    def _parse_proxy(self, proxy):
+        username, password = None, None
+        protocol = proxy[:proxy.find('://')]
+        proxy = proxy[proxy.find('://')+3:]
+        if '@' in proxy:
+            auth, proxy = proxy.split('@')
+            username, password = auth.split(':')
+        host, port = proxy.split(':')
+        port = int(port)
+        return protocol, username, password, host, port
+
     async def _worker(self):
         while not self.task_queue.empty():
             task = await self.task_queue.get()
             proxy = await self.proxy_queue.get()
 
-            async with aiohttp.ClientSession(proxy=proxy) as session:
+            protocol, username, password, host, port = self._parse_proxy(proxy)
+            match protocol:
+                case 'http': proxy_type = ProxyType.HTTP
+                case 'socks4': proxy_type = ProxyType.SOCKS4
+                case 'socks5': proxy_type = ProxyType.SOCKS5
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            connector = ProxyConnector(
+                proxy_type=proxy_type,
+                host=host,
+                port=port,
+                ssl=ssl_context
+            )
+
+            connector_success = False
+            async with aiohttp.ClientSession(proxy=None, connector=connector) as session:
                 try:
                     if type(task) == str:
                         request = session.get(task, ssl=False)
@@ -113,20 +143,78 @@ class ProxyRotator:
                         if resp.status == 200:
                             text = await resp.text()
                             if '{"success":true,"start":0,"pagesize":100,' in text:
-                                print(200)
-                                print(await resp.text())
-                                self.stop()
+                                async with self.proxy_set_sem:
+                                    if proxy not in self.used_set:
+                                        self.success_counter += 1
+                                    connector_success = True
+                                    print(200)
+                                    print(proxy)
+                                    print(f'{self.success_counter}/{len(self.used_set)}, time elapsed: {time.time() - self.time_started}')
                                 async with self.resp_dict_sem:
                                     self.resp_dict[task] = resp
-                                self.proxy_queue[proxy] = Priority.ACTIVE
+                                self.proxy_queue[proxy] = Priority.COOLDOWN ###
                             else:
+                                self.task_queue.put_nowait(task)
+                                self.proxy_queue[proxy] = Priority.INACTIVE
                                 print('Invalid format')
+                        elif resp.status == 429:
+                            print('Cooling down')
+                            self.task_queue.put_nowait(task)
+                            self.proxy_queue[proxy] = Priority.COOLDOWN
                         else:
                             print(resp.status)
                             self.task_queue.put_nowait(task)
                             self.proxy_queue[proxy] = Priority.INACTIVE
                 except Exception as e:
                     print(e.__class__.__name__)
+                finally:
+                    self.used_set.add(proxy)
+            '''
+            proxy_success = False
+            async with aiohttp.ClientSession(proxy=proxy, connector=None) as session:
+                try:
+                    if type(task) == str:
+                        request = session.get(task, ssl=False)
+                    elif type(task) == dict:
+                        request = session.request(**task)
+                    else:
+                        raise Exception('task should be url or dict of aiohttp session.request() params')
+                    
+                    async with request as resp:
+                        if resp.status == 200:
+                            text = await resp.text()
+                            if '{"success":true,"start":0,"pagesize":100,' in text:
+                                async with self.proxy_set_sem:
+                                    if proxy not in self.used_set:
+                                        self.success_counter += 1
+                                    proxy_success = True
+                                    print(200)
+                                    #print(proxy)
+                                    #print(f'{self.success_counter}/{len(self.used_set)}')
+                                async with self.resp_dict_sem:
+                                    self.resp_dict[task] = resp
+                                self.proxy_queue[proxy] = Priority.COOLDOWN ###
+                            else:
+                                self.task_queue.put_nowait(task)
+                                self.proxy_queue[proxy] = Priority.INACTIVE
+                                print('Invalid format')
+                        elif resp.status == 429:
+                            print('Cooling down')
+                            self.task_queue.put_nowait(task)
+                            self.proxy_queue[proxy] = Priority.COOLDOWN
+                        else:
+                            print(resp.status)
+                            self.task_queue.put_nowait(task)
+                            self.proxy_queue[proxy] = Priority.INACTIVE
+                except Exception as e:
+                    print(e.__class__.__name__)
+                finally:
+                    self.used_set.add(proxy)
+            
+            if connector_success != proxy_success:
+                print(f'WARNING UNMATCHED REQUEST STATUS WITH FAVOUR OF {'connector_success' if connector_success else 'proxy_success'} on {proxy}')
+            '''
+                
 
     async def get_session(self):
         if self.running_flag:
@@ -139,6 +227,7 @@ class ProxyRotator:
     def start(self):
         if not self.running_flag:
             self.running_flag = True
+            self.time_started = time.time() ###
             self._workers = []
 
             self._workers.append(asyncio.create_task(self._regular_update_loop()))
@@ -198,11 +287,15 @@ def get_proxy_list():
     table_pandas['city'] = table_pandas['location'].apply(lambda x: None if type(x) == float else x.split('  ')[1])
     table_pandas.drop('location', axis=1, inplace=True)
 
-    proxy_list = list(map(lambda x: f'http://{x[1]['ip_address']}:{x[1]['port']}', filter(lambda x: 'HTTP' in x[1]['protocols'], table_pandas.iterrows())))
+    proxy_list = sum(list(map(
+        lambda x: list(map(
+            lambda y: f'{y.lower()}://{x[1]['ip_address']}:{x[1]['port']}',
+            x[1]['protocols'].replace('"', '').split(', ')
+        )), 
+        table_pandas.iterrows()
+    )), start=[])
 
     return proxy_list
-
-
 
 
 async def test_request(url, proxy=None, connector=None):
@@ -228,17 +321,17 @@ async def main():
     proxy = 'http://8.219.229.53:9080'
     ssl_context = ssl.create_default_context(cafile=certifi.where())
     connector = ProxyConnector(
-        proxy_type=ProxyType.SOCKS4,
-        host='8.220.136.174',
-        port=8443,
+        proxy_type=ProxyType.SOCKS5,
+        host='144.91.71.101',
+        port=27159,
         ssl=ssl_context
     )
-    #print(await test_request(url, proxy=None, connector=None))
-    
+    #print(await test_request(url, proxy=None, connector=connector))
+
     proxy_list = get_proxy_list()
     print(len(proxy_list))
-    tasks = [url] * 3000
-    rotator = ProxyRotator(tasks, proxy_list)
+    tasks = [url] * 5000
+    rotator = ProxyRotator(tasks, proxy_list, 100)
     rotator.start()
     task = asyncio.create_task(rotator.wait_for_tasks())
     await task
