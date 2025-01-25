@@ -2,7 +2,7 @@ import asyncio
 import aiohttp.connector
 from heapdict import heapdict
 import aiohttp
-import requests, json
+import json
 from bs4 import BeautifulSoup as bs
 import pandas as pd
 import io
@@ -11,6 +11,7 @@ import certifi
 import ssl
 import time
 
+import statprof 
 
 class Priority:
     ACTIVE = 0
@@ -66,7 +67,7 @@ class ProxyQueue(heapdict):
 
 
 class ProxyRotator:
-    def __init__(self, task_list, proxy_list=[], max_connections=100, use_direct_connection=False, list_update_function=None, update_period=0):
+    def __init__(self, task_list, proxy_list=[], max_connections=100, use_direct_connection=False, list_update_coroutine=None, update_period=0):
         self.task_queue = asyncio.Queue()
         self.resp_dict = {}
         self.proxy_queue = ProxyQueue()
@@ -76,12 +77,13 @@ class ProxyRotator:
         self.resp_dict_sem = asyncio.Semaphore(1)
         self.max_connections = max_connections
         self.running_flag = False
-        self.list_update_function = list_update_function
+        self.list_update_coroutine = list_update_coroutine
         self.update_period = update_period
 
         self.success_counter = 0
         self.used_set = set()
         self.time_started = time.time()
+        self.proxies_in_use = 0
 
         if proxy_list or use_direct_connection:
             if use_direct_connection:
@@ -98,7 +100,19 @@ class ProxyRotator:
         asyncio.create_task(self.proxy_queue.add_new_proxies(proxies_to_add))
 
     async def _regular_update_loop(self):
-        pass
+        if self.list_update_coroutine:
+            while self.running_flag:
+                await asyncio.sleep(self.update_period)
+                new_list = await self.list_update_coroutine()
+                await self.add_proxies(new_list)
+
+    def _count_proxy_types(self):
+        counts = [0, 0, 0, 0]
+        for item in self.proxy_queue.heap:
+            proxy_type = item[0]
+            counts[proxy_type] += 1
+        counts = dict(zip(['active', 'unchecked', 'inactive', 'cooldown'], counts))
+        return counts
 
     def _parse_proxy(self, proxy):
         username, password = None, None
@@ -115,6 +129,8 @@ class ProxyRotator:
         while not self.task_queue.empty():
             task = await self.task_queue.get()
             proxy = await self.proxy_queue.get()
+
+            self.proxies_in_use += 1
 
             protocol, username, password, host, port = self._parse_proxy(proxy)
             match protocol:
@@ -143,13 +159,13 @@ class ProxyRotator:
                         if resp.status == 200:
                             text = await resp.text()
                             if '{"success":true,"start":0,"pagesize":100,' in text:
-                                async with self.proxy_set_sem:
-                                    if proxy not in self.used_set:
-                                        self.success_counter += 1
-                                    connector_success = True
-                                    print(200)
-                                    print(proxy)
-                                    print(f'{self.success_counter}/{len(self.used_set)}, time elapsed: {time.time() - self.time_started}')
+                                #async with self.proxy_set_sem:
+                                if proxy not in self.used_set:
+                                    self.success_counter += 1
+                                connector_success = True
+                                print(200)
+                                print(proxy)
+                                print(f'{self.success_counter}/{len(self.used_set)}, time elapsed: {int(time.time() - self.time_started)}, proxy counts: {self._count_proxy_types()}, used: {self.proxies_in_use}, overall: {sum(self._count_proxy_types().values(), start=self.proxies_in_use)}')
                                 async with self.resp_dict_sem:
                                     self.resp_dict[task] = resp
                                 self.proxy_queue[proxy] = Priority.COOLDOWN ###
@@ -167,8 +183,11 @@ class ProxyRotator:
                             self.proxy_queue[proxy] = Priority.INACTIVE
                 except Exception as e:
                     print(e.__class__.__name__)
+                    self.task_queue.put_nowait(task)
+                    self.proxy_queue[proxy] = Priority.INACTIVE
                 finally:
                     self.used_set.add(proxy)
+                    self.proxies_in_use -= 1
             '''
             proxy_success = False
             async with aiohttp.ClientSession(proxy=proxy, connector=None) as session:
@@ -257,26 +276,21 @@ class ProxyRotator:
         return self.resp_dict
     
 
-def get_proxy_list():
-    url = 'https://proxycompass.com/free-proxy/'
+async def get_proxy_list():
+    async with aiohttp.ClientSession() as session:
+        url = 'https://proxycompass.com/free-proxy/'
+        async with session.get(url) as resp:
+            resp_text = await resp.text()
 
-    resp = requests.get(url)
-    resp_text = resp.text
+        soup = bs(resp_text, features='html.parser')
+        script = soup.find('script', {'id': 'proxylister-js-js-extra'}).text
+        backend_access = json.loads(script[script.find('{'):script.rfind('}')+1])
 
-    soup = bs(resp_text, features='html.parser')
-
-    script = soup.find('script', {'id': 'proxylister-js-js-extra'}).text
-
-    backend_access = json.loads(script[script.find('{'):script.rfind('}')+1])
-
-    proxy_json_url = backend_access['ajax_url']
-
-    payload = f'nonce={backend_access['nonce']}&action=proxylister_load_filtered&filter[page_size]=100000'
-
-    headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
-
-    resp = requests.post(proxy_json_url, data=payload, headers=headers)
-    proxies_json = resp.json()
+        proxy_json_url = backend_access['ajax_url']
+        payload = f'nonce={backend_access['nonce']}&action=proxylister_load_filtered&filter[page_size]=100000'
+        headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+        async with session.post(proxy_json_url, data=payload, headers=headers) as resp:
+            proxies_json = await resp.json()
 
     table_text = '<table>\n' + proxies_json['data']['rows'] + '</table>'
     table_buffer = io.StringIO(table_text)
@@ -328,17 +342,17 @@ async def main():
     )
     #print(await test_request(url, proxy=None, connector=connector))
 
-    proxy_list = get_proxy_list()
+    proxy_list = await get_proxy_list()
     print(len(proxy_list))
     tasks = [url] * 5000
-    rotator = ProxyRotator(tasks, proxy_list, 100)
+    rotator = ProxyRotator(tasks, proxy_list, 1000, list_update_coroutine=get_proxy_list, update_period=60)
     rotator.start()
     task = asyncio.create_task(rotator.wait_for_tasks())
     await task
     
-
-try:
-    if __name__ == '__main__':
-        asyncio.run(main())
-except asyncio.exceptions.CancelledError as e:
-    pass
+with statprof.profile():
+    try:
+        if __name__ == '__main__':
+            asyncio.run(main())
+    except asyncio.exceptions.CancelledError as e:
+        pass
