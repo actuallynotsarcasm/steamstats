@@ -92,10 +92,24 @@ class ProxyQueue(heapdict):
 
 
 class ProxyRotator:
-    def __init__(self, task_list, proxy_list=[], max_connections=500, proxy_check_workers=100, proxy_check_request='google.com', use_direct_connection=False, list_update_coroutine=None, update_period=0):
+    def __init__(
+        self, 
+        task_list=[], 
+        proxy_list=[], 
+        max_connections=500, 
+        proxy_check_workers=100, 
+        proxy_check_request='google.com', 
+        check_success_coroutine=None,
+        resp_success_coroutine=None,
+        resp_cooldown_coroutine=None,
+        cooldown_duration=60,
+        use_direct_connection=False, 
+        list_update_coroutine=None, 
+        update_period=0
+    ):
         self.task_queue = asyncio.Queue()
         self.resp_dict = {}
-        self.proxy_queue = ProxyQueue()
+        self.proxy_queue = ProxyQueue(cooldown_duration=cooldown_duration)
         self.proxy_set = set()
         self.proxy_metadata = None
         self.proxy_set_sem = asyncio.Semaphore(1)
@@ -103,14 +117,12 @@ class ProxyRotator:
         self.max_connections = max_connections
         self.proxy_check_workers = proxy_check_workers
         self.proxy_check_request = proxy_check_request
+        self.check_success_coroutine = check_success_coroutine if check_success_coroutine else self._check_success_coroutine
+        self.resp_success_coroutine = resp_success_coroutine if resp_success_coroutine else self._resp_success_coroutine
+        self.resp_cooldown_coroutine = resp_cooldown_coroutine if resp_cooldown_coroutine else self._resp_cooldown_coroutine
         self.running_flag = False
         self.list_update_coroutine = list_update_coroutine
         self.update_period = update_period
-
-        self.success_counter = 0
-        self.used_set = set()
-        self.time_started = time.time()
-        self.proxies_in_use = 0
 
         if proxy_list or use_direct_connection:
             if use_direct_connection:
@@ -126,6 +138,15 @@ class ProxyRotator:
             self.proxy_set = self.proxy_set.union(proxies_to_add)
         asyncio.create_task(self.proxy_queue.add_new_proxies(proxies_to_add))
 
+    async def _check_success_coroutine(self, resp):
+        return resp.status == 200
+
+    async def _resp_success_coroutine(self, resp):
+        return resp.status == 200
+    
+    async def _resp_cooldown_coroutine(self, resp):
+        return resp.status == 429
+    
     async def _init_proxy_list(self):
         new_list = await self.list_update_coroutine()
         asyncio.create_task(self.add_proxies(new_list))
@@ -164,21 +185,17 @@ class ProxyRotator:
                 task = self.proxy_check_request
             proxy = await self.proxy_queue.get()
 
-            self.proxies_in_use += 1
-
             protocol, username, password, host, port = self._parse_proxy(proxy)
             match protocol:
                 case 'http': proxy_type = ProxyType.HTTP
                 case 'socks4': proxy_type = ProxyType.SOCKS4
                 case 'socks5': proxy_type = ProxyType.SOCKS5
-            #ssl_context = ssl.create_default_context(cafile=certifi.where())
             connector = ProxyConnector(
                 proxy_type=proxy_type,
                 host=host,
                 port=port,
                 username=username,
                 password=password
-                #ssl=ssl_context
             )
 
             async with aiohttp.ClientSession(proxy=None, connector=connector) as session:
@@ -191,34 +208,22 @@ class ProxyRotator:
                         raise Exception('task should be url or dict of aiohttp session.request() params')
                     
                     async with request as resp:
-                        if resp.status == 200:
-                            text = await resp.text()
-                            if '{"success":true,"start":' in text:
-                                #print(f'200, tasks done: {len(self.resp_dict)+1}, time elapsed: {int(time.time() - self.time_started)}')
-                                #print(proxy)
-                                #print(f'{self.success_counter}/{len(self.used_set)}, time elapsed: {int(time.time() - self.time_started)}, proxy counts: {self._count_proxy_types()}, used: {self.proxies_in_use}, overall: {sum(self._count_proxy_types().values(), start=self.proxies_in_use)}')
-                                async with self.resp_dict_sem:
-                                    self.resp_dict[task] = resp
-                                self.proxy_queue[proxy] = Priority.ACTIVE ###
-                            else:
-                                self.task_queue.put_nowait(task)
-                                self.proxy_queue[proxy] = Priority.INACTIVE
-                                #print('Invalid format')
-                        elif resp.status == 429:
-                            #print('Cooling down')
+                        success_func = self.resp_success_coroutine if objective == 'task' else self.check_success_coroutine
+                        resp_success = await success_func(resp)
+                        resp_cooldown = (await self.resp_cooldown_coroutine(resp)) if self.resp_cooldown_coroutine else False
+                        if resp_success:
+                            async with self.resp_dict_sem:
+                                self.resp_dict[task] = resp
+                            self.proxy_queue[proxy] = Priority.ACTIVE
+                        elif resp_cooldown:
                             self.task_queue.put_nowait(task)
                             self.proxy_queue[proxy] = Priority.COOLDOWN
                         else:
-                            #print(resp.status)
                             self.task_queue.put_nowait(task)
                             self.proxy_queue[proxy] = Priority.INACTIVE
-                except Exception as e:
-                    #print(e.__class__.__name__)
+                except Exception:
                     self.task_queue.put_nowait(task)
                     self.proxy_queue[proxy] = Priority.INACTIVE
-                finally:
-                    self.used_set.add(proxy)
-                    self.proxies_in_use -= 1
 
     async def get_session(self):
         if self.running_flag:
@@ -243,7 +248,6 @@ class ProxyRotator:
     def start(self):
         if not self.running_flag:
             self.running_flag = True
-            self.time_started = time.time() ###
             self._workers = []
 
             self._workers.append(asyncio.create_task(self._regular_update_loop()))
@@ -277,81 +281,3 @@ class ProxyRotator:
         await asyncio.gather(*self._workers)
         self.running_flag = False
         return self.resp_dict
-    
-
-async def get_proxy_list():
-    async with aiohttp.ClientSession() as session:
-        url = 'https://proxycompass.com/free-proxy/'
-        async with session.get(url) as resp:
-            resp_text = await resp.text()
-
-        soup = bs(resp_text, features='html.parser')
-        script = soup.find('script', {'id': 'proxylister-js-js-extra'}).text
-        backend_access = json.loads(script[script.find('{'):script.rfind('}')+1])
-
-        proxy_json_url = backend_access['ajax_url']
-        payload = f'nonce={backend_access['nonce']}&action=proxylister_load_filtered&filter[page_size]=100000'
-        headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
-        async with session.post(proxy_json_url, data=payload, headers=headers) as resp:
-            proxies_json = await resp.json()
-
-    table_text = '<table>\n' + proxies_json['data']['rows'] + '</table>'
-    table_buffer = io.StringIO(table_text)
-
-    table_pandas = pd.read_html(table_buffer, flavor='lxml')[0]
-    table_pandas.columns = ['ip_address', 'port', 'protocols', 'anonimity', 'location', 'provider', 'ping', 'bandwidth', 'availability', 'last_checked']
-    table_pandas['country'] = table_pandas['location'].apply(lambda x: None if type(x) == float else x.split('  ')[0])
-    table_pandas['city'] = table_pandas['location'].apply(lambda x: None if type(x) == float else x.split('  ')[1])
-    table_pandas.drop('location', axis=1, inplace=True)
-
-    proxy_list = sum(list(map(
-        lambda x: list(map(
-            lambda y: f'{y.lower()}://{x[1]['ip_address']}:{x[1]['port']}',
-            x[1]['protocols'].replace('"', '').split(', ')
-        )), 
-        table_pandas.iterrows()
-    )), start=[])
-
-    return proxy_list
-
-
-async def test_request(url, proxy=None, connector=None):
-    async with aiohttp.ClientSession(connector=connector, proxy=proxy) as session:
-        async with session.get(url, ssl=False) as resp:
-            print(resp.status)
-            return await resp.text()
-
-
-async def main():
-    '''
-    q = ProxyQueue()
-    task1 = asyncio.create_task(q.get_active())
-    task2 = asyncio.create_task(q.get_active())
-    q['proxy1'] = Priority.ACTIVE
-    q['proxy2'] = Priority.ACTIVE
-    print(await task1)
-    print(await task2)
-    '''
-    url = 'https://steamcommunity.com/market/search/render/?query=&start=0&count=100&search_descriptions=0&sort_column=name&sort_dir=desc&appid=730&norender=1'
-    proxy_list = await get_proxy_list()
-    print(len(proxy_list))
-    #tasks = [url.replace('start=0', f'start={i}') for i in range(10000)]
-    rotator = ProxyRotator([], proxy_list, 600, proxy_check_workers=200, proxy_check_request=url, list_update_coroutine=get_proxy_list, update_period=60)
-    rotator.start()
-    #task = asyncio.create_task(rotator.wait_for_tasks())
-    #await task
-    session = await rotator.get_session()
-    print(session.closed)
-    async with session:
-        print(session.closed)
-        async with session.get(url, ssl=False) as resp:
-            print(resp.status)
-            print((await resp.text())[:100])
-    print(session.closed)
-    
-
-try:
-    if __name__ == '__main__':
-        asyncio.run(main())
-except asyncio.exceptions.CancelledError as e:
-    pass
