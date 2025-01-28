@@ -14,5 +14,7 @@
 /gemini_key.txt
 /proxy.txt
 /resp_x.html
+/resp_test.html
 /parser/parser_data
 /parser/__pycache__
+/parser/backend/__pycache__

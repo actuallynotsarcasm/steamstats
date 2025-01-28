@@ -1,13 +1,9 @@
 import asyncio
+import aiohttp
 import aiohttp.connector
 from heapdict import heapdict
-import aiohttp
-import json
-from bs4 import BeautifulSoup as bs
-import pandas as pd
-import io
+from tqdm import tqdm
 from aiohttp_socks import ProxyType, ProxyConnector
-import time
 
 
 class Priority:
@@ -105,7 +101,8 @@ class ProxyRotator:
         cooldown_duration=60,
         use_direct_connection=False, 
         list_update_coroutine=None, 
-        update_period=0
+        update_period=0,
+        verbose=False
     ):
         self.task_queue = asyncio.Queue()
         self.resp_dict = {}
@@ -123,20 +120,23 @@ class ProxyRotator:
         self.running_flag = False
         self.list_update_coroutine = list_update_coroutine
         self.update_period = update_period
+        self.verbose = verbose
+
+        self.total_tasks = 0
+        if verbose:
+            self.pbar = tqdm(total=len(task_list))
 
         if proxy_list or use_direct_connection:
             if use_direct_connection:
-                pass #TODO
+                proxy_list.extend([]) #TODO
             asyncio.create_task(self.add_proxies(proxy_list))
+        elif self.list_update_coroutine:
+            asyncio.create_task(self._init_proxy_list())
+
         for task in task_list:
             self.task_queue.put_nowait(task)
-
-    async def add_proxies(self, new_list):
-        new_set = set(new_list)
-        async with self.proxy_set_sem:
-            proxies_to_add = new_set.difference(self.proxy_set)
-            self.proxy_set = self.proxy_set.union(proxies_to_add)
-        asyncio.create_task(self.proxy_queue.add_new_proxies(proxies_to_add))
+            self.total_tasks += 1
+        self._start()
 
     async def _check_success_coroutine(self, resp):
         return resp.status == 200
@@ -215,15 +215,71 @@ class ProxyRotator:
                             async with self.resp_dict_sem:
                                 self.resp_dict[task] = resp
                             self.proxy_queue[proxy] = Priority.ACTIVE
+                            if self.verbose:
+                                self.pbar.update(1)
                         elif resp_cooldown:
-                            self.task_queue.put_nowait(task)
+                            asyncio.create_task(self._add_tasks([task]))
                             self.proxy_queue[proxy] = Priority.COOLDOWN
                         else:
-                            self.task_queue.put_nowait(task)
+                            asyncio.create_task(self._add_tasks([task]))
                             self.proxy_queue[proxy] = Priority.INACTIVE
                 except Exception:
-                    self.task_queue.put_nowait(task)
+                    asyncio.create_task(self._add_tasks([task]))
                     self.proxy_queue[proxy] = Priority.INACTIVE
+    
+    def _start(self):
+        if not self.running_flag:
+            if self.verbose:
+                self.pbar.write('Starting rotation')
+            self.running_flag = True
+            self._workers = []
+            self._check_workers = []
+
+            self._update_loop_task = asyncio.create_task(self._regular_update_loop())
+
+            if self.max_connections == -1:
+                num_workers = self.task_queue.qsize()
+            else:
+                num_workers = min(self.task_queue.qsize(), self.max_connections)
+
+            for _ in range(num_workers):
+                self._workers.append(asyncio.create_task(self._worker('task')))
+
+            for _ in range(self.proxy_check_workers):
+                self._check_workers.append(asyncio.create_task(self._worker('check')))
+
+            if self.verbose:
+                self.pbar.write('Rotation started')
+        else:
+            raise Exception('rotation already started')
+        
+    async def _add_tasks(self, task_list):
+        for task in task_list:
+            await self.task_queue.put(task)
+        if len(self._workers) < self.max_connections:
+            if len(self._workers) < self.task_queue.qsize():
+                workers_to_add = min(self.max_connections, self.task_queue.qsize()) - len(self._workers)
+                self._workers.extend(
+                    [asyncio.create_task(self._worker()) for _ in range(workers_to_add)]
+                )
+        
+    async def add_tasks(self, task_list):
+        self.total_tasks += len(task_list)
+        if self.verbose:
+            self.pbar.reset(self.total_tasks)
+            self.pbar.update(len(self.resp_dict))
+        await self._add_tasks(task_list)
+        if self.verbose:
+            self.pbar.write(f'Adding {len(task_list)} tasks, total: {self.total_tasks}')
+
+    async def add_proxies(self, proxy_list):
+        new_set = set(proxy_list)
+        async with self.proxy_set_sem:
+            proxies_to_add = new_set.difference(self.proxy_set)
+            self.proxy_set = self.proxy_set.union(proxies_to_add)
+        asyncio.create_task(self.proxy_queue.add_new_proxies(proxies_to_add))
+        if self.verbose:
+            self.pbar.write(f'Adding {len(proxies_to_add)} proxies')
 
     async def get_session(self):
         if self.running_flag:
@@ -245,39 +301,27 @@ class ProxyRotator:
         else:
             raise Exception('cannot get session because rotation has not been started')
 
-    def start(self):
-        if not self.running_flag:
-            self.running_flag = True
-            self._workers = []
-
-            self._workers.append(asyncio.create_task(self._regular_update_loop()))
-
-            if self.max_connections == -1:
-                num_workers = self.task_queue.qsize()
-            else:
-                num_workers = min(self.task_queue.qsize(), self.max_connections)
-
-            for _ in range(num_workers):
-                self._workers.append(asyncio.create_task(self._worker('task')))
-
-            for _ in range(self.proxy_check_workers):
-                self._workers.append(asyncio.create_task(self._worker('check')))
-
-            if len(self.proxy_set) == 0 and self.list_update_coroutine:
-                asyncio.create_task(self._init_proxy_list())
-        else:
-            raise Exception('rotation already started')
-
     def stop(self):
         if self.running_flag:
             self.running_flag = False
+            if self.verbose:
+                self.pbar.write('Stopping rotation')
+            self.running_flag = False
             for worker in self._workers:
                 worker.cancel()
+            for worker in self._check_workers:
+                worker.cancel()
+            self._update_loop_task.cancel()
+            if self.verbose:
+                self.pbar.write('Rotation stopped')
             return self.resp_dict
         else:
             raise Exception('cannot stop rotation because it has not been started')
         
     async def wait_for_tasks(self):
-        await asyncio.gather(*self._workers)
-        self.running_flag = False
-        return self.resp_dict
+        if self.running_flag:
+            while self.total_tasks > len(self.resp_dict):
+                await asyncio.sleep(0.1)
+            return self.stop()
+        else:
+            raise Exception('cannot wait for tasks because rotation has not been started')

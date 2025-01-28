@@ -60,7 +60,6 @@ async def main():
         list_update_coroutine=get_proxy_list,
         update_period=60
     )
-    proxy_rotator.start()
     start_values = range(0, total_count, page_count)
     tasks = list(map(lambda x: asyncio.create_task(parse_page(x, page_count, proxy_rotator)), start_values))
     while len(list(filter(lambda x: x.done(), tasks))) < len(tasks):

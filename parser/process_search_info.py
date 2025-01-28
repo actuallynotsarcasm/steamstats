@@ -15,12 +15,12 @@ def parse_item(item: dict) -> dict:
     if item_type in ['Equipment', 'Knife', 'Machinegun', 'Pistol', 'Rifle', 'Shotgun', 'SMG', 'Sniper Rifle']:
         item['metadata']['weapon_class'] = item_type
         item_type = 'Weapon'
-    elif type in ['Gift', 'Tag', 'Tool']:
+    elif item_type in ['Gift', 'Tag', 'Tool']:
         item['metadata']['other_type'] = item_type
         item_type = 'Other'
     
     item['type'] = item_type
-    if item_type in ['Weapon', 'Sticker', 'Charm', 'Agent', 'Patch', 'Graffity', 'Collectible']:
+    if item_type in ['Weapon', 'Sticker', 'Charm', 'Agent', 'Patch', 'Graffiti', 'Collectible']:
         item['metadata']['rarity'] = rarity
 
     return item
